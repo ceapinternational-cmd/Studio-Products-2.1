@@ -1,14 +1,4 @@
 <!DOCTYPE html>
-<html lang="en">
-
-  <head>
-    <meta charset="UTF-8">
-    <title>Studio Products 2</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"><link rel="stylesheet" href="/style.css">
-  </head>
-
-  <body>
-    <!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
@@ -139,6 +129,34 @@
         background: transparent; border: 1px solid currentColor;
         color: inherit; padding: 0.25rem 0.6rem; border-radius: 6px;
         font-size: 0.68rem; cursor: pointer; font-family: inherit;
+    }
+
+    .backup-zone {
+        margin-top: 0.8rem; padding-top: 0.8rem;
+        border-top: 1px dashed var(--border);
+    }
+    .backup-zone-label {
+        font-size: 0.7rem; color: var(--ink-dim);
+        text-transform: uppercase; letter-spacing: 0.06em;
+        font-weight: 600; margin-bottom: 0.5rem;
+        display: flex; align-items: center; gap: 0.3rem;
+    }
+    .backup-actions {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem;
+    }
+    .backup-actions button {
+        padding: 0.6rem 0.5rem; border-radius: 8px;
+        border: 1px solid var(--border); background: var(--panel-2);
+        color: var(--ink); font-size: 0.72rem;
+        font-family: inherit; font-weight: 500;
+        cursor: pointer; transition: all 0.15s;
+        display: flex; align-items: center; justify-content: center; gap: 0.3rem;
+    }
+    .backup-actions button:active { transform: scale(0.97); }
+    .backup-actions button:hover { border-color: var(--ink); }
+    .backup-hint {
+        font-size: 0.68rem; color: var(--ink-dim);
+        margin-top: 0.5rem; line-height: 1.4;
     }
 
     .upload-zone {
@@ -364,6 +382,20 @@
         <span id="wake-status-text">💤 Veille automatique</span>
         <button type="button" id="wake-toggle-btn">Garder l'écran allumé</button>
     </div>
+
+    <!-- SAUVEGARDE / RESTAURATION -->
+    <div class="backup-zone">
+        <div class="backup-zone-label">💾 Sauvegarde de sécurité</div>
+        <div class="backup-actions">
+            <button type="button" id="export-config-btn">⬇ Exporter</button>
+            <button type="button" id="import-config-btn">⬆ Importer</button>
+        </div>
+        <input type="file" id="import-config-input" accept=".json,application/json" style="display:none;">
+        <div class="backup-hint">
+            💡 Sauvegarde ta <strong>clé API</strong> + ton <strong>historique</strong> dans un fichier.
+            À réimporter sur un autre téléphone ou après réinstallation.
+        </div>
+    </div>
 </div>
 
 <div class="upload-zone" id="upload-zone">
@@ -526,7 +558,6 @@ let createIntervalMs = 62000;
 const CREATE_INTERVAL_MIN = 62000;
 const CREATE_INTERVAL_MAX = 90000;
 const CREATE_INTERVAL_SAFE = 75000;
-
 const POLL_INTERVAL_SEC = 8;
 const MAX_POLL_ATTEMPTS = 100;
 
@@ -762,6 +793,138 @@ function clearAllHistory() {
     saveHistory([]);
     renderGallery();
     showToast('Historique effacé', 'success');
+}
+
+// ══════════════════════════════════════════════════════════════════
+// EXPORT / IMPORT DE CONFIGURATION
+// ══════════════════════════════════════════════════════════════════
+function exportConfiguration() {
+    const apiKey = getApiKey();
+    const history = loadHistory();
+    const timingCache = loadTimingCache();
+    let wakeLockPref = '0';
+    try { wakeLockPref = localStorage.getItem(WAKE_LOCK_PREF) || '0'; } catch (e) {}
+
+    if (!apiKey && history.length === 0) {
+        showToast('Rien à exporter (pas de clé ni d\'historique)', 'warn', 3000);
+        return;
+    }
+
+    const backup = {
+        _meta: {
+            app: 'Studio Produit',
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            exportedAtLocal: new Date().toLocaleString('fr-FR')
+        },
+        apiKey: apiKey,
+        history: history,
+        timingCache: timingCache,
+        wakeLockPref: wakeLockPref
+    };
+
+    const json = JSON.stringify(backup, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const now = new Date();
+    const dateStr = now.getFullYear() + '-' +
+        String(now.getMonth() + 1).padStart(2, '0') + '-' +
+        String(now.getDate()).padStart(2, '0') + '_' +
+        String(now.getHours()).padStart(2, '0') + '-' +
+        String(now.getMinutes()).padStart(2, '0');
+    a.href = url;
+    a.download = 'studio-produit-backup-' + dateStr + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+    const summary = [];
+    if (apiKey) summary.push('clé API');
+    if (history.length) summary.push(history.length + ' vidéo' + (history.length > 1 ? 's' : ''));
+    showToast('Sauvegarde exportée ✓ (' + summary.join(' + ') + ')', 'success', 3500);
+    log('Configuration exportée : ' + summary.join(', '));
+}
+
+function importConfiguration(file) {
+    if (!file) return;
+    if (!confirm('Importer cette configuration ?\n\nTa clé API et ton historique ACTUELS seront remplacés par ceux du fichier.')) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const backup = JSON.parse(e.target.result);
+            if (!backup || typeof backup !== 'object') throw new Error('Format invalide');
+
+            // Détection des clés attendues
+            const hasApiKey = typeof backup.apiKey === 'string';
+            const hasHistory = Array.isArray(backup.history);
+            const hasTiming = backup.timingCache && typeof backup.timingCache === 'object';
+
+            if (!hasApiKey && !hasHistory && !hasTiming) {
+                throw new Error('Fichier de sauvegarde non reconnu');
+            }
+
+            const summary = [];
+
+            if (hasApiKey && backup.apiKey.trim()) {
+                try {
+                    localStorage.setItem(API_KEY_STORAGE, backup.apiKey.trim());
+                    summary.push('clé API');
+                } catch (err) {}
+            }
+
+            if (hasHistory) {
+                try {
+                    saveHistory(backup.history.slice(0, HISTORY_MAX));
+                    summary.push(backup.history.length + ' vidéo' + (backup.history.length > 1 ? 's' : ''));
+                } catch (err) {}
+            }
+
+            if (hasTiming) {
+                try { saveTimingCache(backup.timingCache); } catch (err) {}
+            }
+
+            if (typeof backup.wakeLockPref === 'string') {
+                try {
+                    localStorage.setItem(WAKE_LOCK_PREF, backup.wakeLockPref);
+                    wakeLockEnabled = backup.wakeLockPref === '1';
+                } catch (err) {}
+            }
+
+            // Rafraîchit l'UI
+            updateApiPanel();
+            updateTimingDisplay();
+            updateWakeStatus();
+            renderGallery();
+
+            // Vérifie si les URLs des vidéos sont encore accessibles
+            const history = loadHistory();
+            const oldEntries = history.filter(e => {
+                if (!e.timestamp) return false;
+                const ageDays = (Date.now() - e.timestamp) / (1000 * 60 * 60 * 24);
+                return ageDays > 30;
+            });
+
+            let message = 'Configuration importée ✓';
+            if (summary.length) message += ' (' + summary.join(' + ') + ')';
+            showToast(message, 'success', 4000);
+
+            if (oldEntries.length > 0) {
+                setTimeout(() => {
+                    showToast('⚠️ ' + oldEntries.length + ' vidéo(s) ancienne(s) : l\'URL Agnes peut avoir expiré', 'warn', 6000);
+                }, 4200);
+            }
+
+            log('Configuration importée : ' + summary.join(', '));
+        } catch (err) {
+            console.error('Import échoué :', err);
+            showToast('Fichier invalide : ' + err.message, 'error', 5000);
+        }
+    };
+    reader.onerror = () => showToast('Lecture du fichier échouée', 'error');
+    reader.readAsText(file);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1305,9 +1468,6 @@ async function createVideoTask(imageDataUri, prompt) {
     return videoId;
 }
 
-// ══════════════════════════════════════════════════════════════════
-// ▼▼▼ FONCTION POLLING CORRIGÉE (version debug) ▼▼▼
-// ══════════════════════════════════════════════════════════════════
 async function pollVideo(videoId, onProgress) {
     const estimatedMs = estimateGenerationTime(state.durationFrames);
     const estimatedSec = estimatedMs / 1000;
@@ -1347,24 +1507,17 @@ async function pollVideo(videoId, onProgress) {
             continue;
         }
 
-        // ══════════════════════════════════════════════════════
-        // DEBUG — log la réponse brute
-        // ══════════════════════════════════════════════════════
         console.log('🔍 RÉPONSE AGNES BRUTE (tentative ' + attempt + ') :', JSON.stringify(d, null, 2));
 
-        // Statut : cherche dans plein d'endroits possibles
         const statusRaw = d.status || d.state || d.task_status || d.video_status || (d.data && d.data.status) || 'unknown';
         const status = String(statusRaw).toLowerCase();
         const progress = d.progress || d.percent || (d.data && d.data.progress) || 0;
 
-        // Affiche le statut réel
         onProgress(status + ' — ' + progress + '%');
 
-        // Détection large du succès
         const successStatuses = ['completed', 'succeeded', 'done', 'success', 'finished', 'complete', 'ready', 'ok', 'succ'];
         const codeOk = (d.code === 0 || d.code === 200 || d.code === '0' || d.code === '200');
         if (successStatuses.includes(status) || codeOk) {
-            // Cherche l'URL à tous les endroits possibles
             const videoUrl =
                 (d.metadata && d.metadata.url) ||
                 (d.metadata && d.metadata.video_url) ||
@@ -1384,25 +1537,13 @@ async function pollVideo(videoId, onProgress) {
             return videoUrl;
         }
 
-        // Détection large de l'échec
         const failStatuses = ['failed', 'error', 'cancelled', 'canceled', 'rejected', 'timeout', 'expired'];
         if (failStatuses.includes(status)) {
             throw new Error('Échec (' + status + ') — ' + JSON.stringify(d).slice(0, 200));
         }
-        // Code d'erreur explicite
-        if (d.code !== undefined && !codeOk && d.code !== 1 && d.code !== '1') {
-            // Certains codes peuvent signifier "en cours" — on ignore si message contient "process"
-            const msg = String(d.message || d.msg || '').toLowerCase();
-            if (!msg.includes('process') && !msg.includes('pending') && !msg.includes('running')) {
-                console.warn('Code retour inattendu :', d.code, d.message);
-            }
-        }
     }
     throw new Error('Délai maximal dépassé');
 }
-// ══════════════════════════════════════════════════════════════════
-// ▲▲▲ FIN FONCTION POLLING CORRIGÉE ▲▲▲
-// ══════════════════════════════════════════════════════════════════
 
 // ══════════════════════════════════════════════════════════════════
 // FILE D'ATTENTE
@@ -1689,6 +1830,17 @@ function stopGeneration() {
         });
     }
 
+    // Export / Import config
+    document.getElementById('export-config-btn')?.addEventListener('click', exportConfiguration);
+    document.getElementById('import-config-btn')?.addEventListener('click', () => {
+        document.getElementById('import-config-input').click();
+    });
+    document.getElementById('import-config-input')?.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) importConfiguration(file);
+        e.target.value = '';
+    });
+
     document.querySelectorAll('[data-toggle]').forEach(header => {
         header.addEventListener('click', () => {
             document.getElementById(header.dataset.toggle).classList.toggle('open');
@@ -1739,8 +1891,4 @@ function stopGeneration() {
 </script>
 
 </body>
-</html>
-    <script src="/script.js"></script>
-  </body>
-
 </html>
